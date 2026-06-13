@@ -38,7 +38,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 4. Install dependency.
 
 ```powershell
-pip install streamlit google-generativeai python-dotenv
+pip install -r requirements.txt
 ```
 
 ## Setup API Key
@@ -74,12 +74,23 @@ http://localhost:8501
 ## Fitur Utama
 
 - Chatbot TravelBuddy untuk pertanyaan wisata, daerah, negara, landmark, dan rekomendasi perjalanan
+- RAG dengan LangChain untuk menjawab berdasarkan dokumen PDF/TXT/MD yang diupload
 - History chat di sidebar kiri
 - Tombol `Chat baru`
 - Tombol `Hapus chat ini`
 - Tombol `Reset chat`
 - Penyimpanan riwayat lokal di `chat_history.json`
 - Filter pertanyaan di luar topik travel agar tidak memakai kuota Gemini
+
+## Menggunakan RAG
+
+1. Jalankan aplikasi seperti biasa.
+2. Di sidebar kiri, buka bagian `Knowledge base`.
+3. Upload satu atau beberapa file `PDF`, `TXT`, atau `MD`.
+4. Klik `Proses dokumen`.
+5. Setelah muncul pesan bahwa knowledge base siap, ajukan pertanyaan tentang isi dokumen.
+
+Saat knowledge base aktif, pertanyaan akan dicari dulu ke dokumen menggunakan LangChain dan Gemini Embeddings. Konteks hasil pencarian dikirim ke Gemini agar jawabannya lebih sesuai dengan dokumen.
 
 ## Catatan Penggunaan
 
@@ -96,6 +107,7 @@ Ctrl + F5
 ```text
 gemini_chatbot_project/
 +-- app.py              # Aplikasi utama Streamlit
++-- requirements.txt    # Dependency project
 +-- .env.example        # Contoh konfigurasi environment
 +-- .env                # API key lokal, jangan dibagikan
 +-- chat_history.json   # Riwayat chat lokal

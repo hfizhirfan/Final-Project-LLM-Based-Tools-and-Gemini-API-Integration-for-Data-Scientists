@@ -2,11 +2,25 @@ import os
 import json
 import re
 import uuid
+from io import BytesIO
 from datetime import datetime
 
 import google.generativeai as genai
 import streamlit as st
 from dotenv import load_dotenv
+
+try:
+    from langchain_core.documents import Document
+    from langchain_core.vectorstores import InMemoryVectorStore
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from pypdf import PdfReader
+except ImportError:
+    Document = None
+    InMemoryVectorStore = None
+    GoogleGenerativeAIEmbeddings = None
+    RecursiveCharacterTextSplitter = None
+    PdfReader = None
 
 
 load_dotenv()
@@ -14,6 +28,7 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 genai.configure(api_key=API_KEY)
 
 HISTORY_FILE = "chat_history.json"
+RAG_TOP_K = 4
 
 generation_config = {
     "temperature": 0.7,
@@ -26,6 +41,9 @@ Selalu berikan rekomendasi tempat, kuliner, aktivitas, dan estimasi budget jika 
 Kamu hanya boleh menjawab pertanyaan tentang perjalanan, wisata, itinerary, destinasi,
 transportasi liburan, akomodasi, kuliner untuk perjalanan, oleh-oleh, dan budget wisata
 atau pertanyaan umum tentang nama daerah, kota, pulau, provinsi, dan negara.
+Jika prompt memuat konteks dokumen RAG, kamu boleh menjawab berdasarkan konteks dokumen
+tersebut meskipun topiknya bukan travel. Jangan mengarang jika jawabannya tidak ada di
+konteks dokumen.
 Jika pengguna menanyakan daerah atau negara, beri jawaban umum singkat, lalu tekankan
 landmark/tempat ikoniknya dan berikan rekomendasi wisata yang relevan.
 Jika pengguna membandingkan dua daerah, jelaskan perbedaannya secara natural:
@@ -321,6 +339,108 @@ def out_of_scope_response():
         "yang enak dikunjungi pertama kali."
     )
 
+
+def rag_dependencies_ready():
+    return all(
+        [
+            Document,
+            InMemoryVectorStore,
+            GoogleGenerativeAIEmbeddings,
+            RecursiveCharacterTextSplitter,
+            PdfReader,
+        ]
+    )
+
+
+def extract_text_from_upload(uploaded_file):
+    file_name = uploaded_file.name
+    extension = file_name.rsplit(".", 1)[-1].lower()
+
+    if extension == "pdf":
+        reader = PdfReader(BytesIO(uploaded_file.getvalue()))
+        pages = []
+        for page_number, page in enumerate(reader.pages, start=1):
+            page_text = page.extract_text() or ""
+            if page_text.strip():
+                pages.append(
+                    Document(
+                        page_content=page_text,
+                        metadata={"source": file_name, "page": page_number},
+                    )
+                )
+        return pages
+
+    text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+    if not text.strip():
+        return []
+
+    return [Document(page_content=text, metadata={"source": file_name})]
+
+
+def build_rag_index(uploaded_files):
+    documents = []
+    for uploaded_file in uploaded_files:
+        documents.extend(extract_text_from_upload(uploaded_file))
+
+    if not documents:
+        return None, []
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=180)
+    chunks = splitter.split_documents(documents)
+    embeddings = GoogleGenerativeAIEmbeddings(
+        model="models/text-embedding-004",
+        google_api_key=API_KEY,
+    )
+    vector_store = InMemoryVectorStore.from_documents(chunks, embeddings)
+    sources = sorted(
+        {
+            document.metadata.get("source", "Dokumen tanpa nama")
+            for document in documents
+        }
+    )
+    return vector_store, sources
+
+
+def get_rag_context(question):
+    vector_store = st.session_state.get("rag_vector_store")
+    if vector_store is None:
+        return ""
+
+    retriever = vector_store.as_retriever(search_kwargs={"k": RAG_TOP_K})
+    documents = retriever.invoke(question)
+    if not documents:
+        return ""
+
+    context_blocks = []
+    for index, document in enumerate(documents, start=1):
+        source = document.metadata.get("source", "Dokumen")
+        page = document.metadata.get("page")
+        source_label = f"{source} halaman {page}" if page else source
+        context_blocks.append(
+            f"[Konteks {index} | {source_label}]\n{document.page_content}"
+        )
+
+    return "\n\n".join(context_blocks)
+
+
+def build_model_prompt(user_question):
+    rag_context = get_rag_context(user_question)
+    if not rag_context:
+        return user_question
+
+    return f"""
+Gunakan konteks dokumen berikut jika relevan dengan pertanyaan pengguna.
+Jika konteks dokumen tidak relevan atau tidak cukup, katakan dengan jujur lalu jawab
+berdasarkan pengetahuan umum TravelBuddy. Tetap prioritaskan jawaban seputar travel,
+landmark, destinasi, itinerary, kuliner, dan budget.
+
+Konteks dokumen:
+{rag_context}
+
+Pertanyaan pengguna:
+{user_question}
+"""
+
 st.set_page_config(
     page_title="TravelBuddy AI",
     page_icon="✈️",
@@ -524,6 +644,12 @@ if "active_conversation_id" not in st.session_state:
     else:
         new_conversation()
 
+if "rag_vector_store" not in st.session_state:
+    st.session_state.rag_vector_store = None
+
+if "rag_sources" not in st.session_state:
+    st.session_state.rag_sources = []
+
 active_conversation = get_active_conversation()
 
 with st.sidebar:
@@ -593,6 +719,56 @@ for message in active_conversation["messages"]:
     with st.chat_message(role, avatar=avatar):
         st.markdown(message["content"])
 
+with st.expander("Tambahkan dokumen untuk knowledge base", expanded=False):
+    st.caption("Upload PDF, TXT, atau MD agar TravelBuddy bisa menjawab dari isi dokumen.")
+
+    if not rag_dependencies_ready():
+        st.warning(
+            "Fitur RAG butuh dependency tambahan. Jalankan `pip install -r requirements.txt`, "
+            "lalu restart Streamlit."
+        )
+    elif not API_KEY:
+        st.warning("Isi `GEMINI_API_KEY` di `.env` agar embedding RAG bisa dibuat.")
+    else:
+        uploaded_knowledge_files = st.file_uploader(
+            "Dokumen RAG",
+            type=["pdf", "txt", "md"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+        )
+
+        action_column, status_column = st.columns([0.32, 0.68])
+        with action_column:
+            process_documents = st.button("Proses dokumen", use_container_width=True)
+        with status_column:
+            if st.session_state.rag_sources:
+                st.caption(
+                    "Aktif: "
+                    + ", ".join(st.session_state.rag_sources)
+                )
+            else:
+                st.caption("Belum ada dokumen aktif.")
+
+        if process_documents:
+            if not uploaded_knowledge_files:
+                st.warning("Upload minimal satu dokumen dulu.")
+            else:
+                with st.spinner("Membuat index RAG..."):
+                    vector_store, sources = build_rag_index(uploaded_knowledge_files)
+
+                if vector_store:
+                    st.session_state.rag_vector_store = vector_store
+                    st.session_state.rag_sources = sources
+                    st.success("Knowledge base siap dipakai.")
+                else:
+                    st.warning("Tidak ada teks yang bisa dibaca dari dokumen.")
+
+        if st.session_state.rag_sources:
+            if st.button("Hapus knowledge base", use_container_width=True):
+                st.session_state.rag_vector_store = None
+                st.session_state.rag_sources = []
+                st.rerun()
+
 user_input = st.chat_input("Tanya destinasi, itinerary, kuliner, atau budget liburan...")
 
 if user_input:
@@ -605,7 +781,7 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant", avatar="🧭"):
-        if not is_travel_question(user_input):
+        if st.session_state.rag_vector_store is None and not is_travel_question(user_input):
             assistant_response = out_of_scope_response()
             active_conversation["messages"].append(
                 {"role": "assistant", "content": assistant_response}
@@ -617,7 +793,7 @@ if user_input:
                 chat_session = model.start_chat(
                     history=gemini_history(active_conversation["messages"][:-1])
                 )
-                response = chat_session.send_message(user_input)
+                response = chat_session.send_message(build_model_prompt(user_input))
                 active_conversation["messages"].append(
                     {"role": "assistant", "content": response.text}
                 )
