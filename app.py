@@ -7,7 +7,7 @@ from datetime import datetime
 
 import google.generativeai as genai
 import streamlit as st
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 try:
     from langchain_core.documents import Document
@@ -23,9 +23,9 @@ except ImportError:
     PdfReader = None
 
 
-load_dotenv()
-API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=API_KEY)
+API_KEY = (dotenv_values(".env").get("GEMINI_API_KEY") or "").strip()
+if API_KEY:
+    genai.configure(api_key=API_KEY)
 
 HISTORY_FILE = "chat_history.json"
 RAG_TOP_K = 4
@@ -788,6 +788,16 @@ if user_input:
             )
             save_conversations()
             st.markdown(assistant_response)
+        elif not API_KEY:
+            assistant_response = (
+                "API key Gemini belum tersedia. Isi `GEMINI_API_KEY` di file `.env`, "
+                "lalu restart Streamlit agar TravelBuddy bisa menjawab pertanyaan baru."
+            )
+            active_conversation["messages"].append(
+                {"role": "assistant", "content": assistant_response}
+            )
+            save_conversations()
+            st.warning(assistant_response)
         else:
             with st.spinner("TravelBuddy lagi menyusun rekomendasi..."):
                 chat_session = model.start_chat(
